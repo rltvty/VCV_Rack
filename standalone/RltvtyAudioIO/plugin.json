@@ -1,0 +1,59 @@
+{
+  "slug": "RltvtyAudioIO",
+  "name": "Rltvty Audio IO",
+  "version": "2.0.0",
+  "license": "proprietary",
+  "brand": "rltvty",
+  "author": "rltvty",
+  "description": "Split Rack audio interface modules with sticky device reconnection",
+  "modules": [
+    {
+      "slug": "AudioIn2",
+      "name": "Audio In 2",
+      "description": "Receives audio from a hardware device into Rack",
+      "tags": [
+        "External"
+      ]
+    },
+    {
+      "slug": "AudioIn8",
+      "name": "Audio In 8",
+      "description": "Receives audio from a hardware device into Rack",
+      "tags": [
+        "External"
+      ]
+    },
+    {
+      "slug": "AudioIn16",
+      "name": "Audio In 16",
+      "description": "Receives audio from a hardware device into Rack",
+      "tags": [
+        "External"
+      ]
+    },
+    {
+      "slug": "AudioOut2",
+      "name": "Audio Out 2",
+      "description": "Sends Rack audio to a hardware device",
+      "tags": [
+        "External"
+      ]
+    },
+    {
+      "slug": "AudioOut8",
+      "name": "Audio Out 8",
+      "description": "Sends Rack audio to a hardware device",
+      "tags": [
+        "External"
+      ]
+    },
+    {
+      "slug": "AudioOut16",
+      "name": "Audio Out 16",
+      "description": "Sends Rack audio to a hardware device",
+      "tags": [
+        "External"
+      ]
+    }
+  ]
+}
