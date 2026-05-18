@@ -2,7 +2,6 @@
 
 #include "plugin.hpp"
 
-
 namespace {
 
 
@@ -11,38 +10,152 @@ struct StickyAudioPort : audio::Port {
 	float desiredSampleRate = 0.f;
 	int desiredBlockSize = 0;
 	bool autoReconnect = true;
+	bool streamActive = false;
+	double nextReconnectAttempt = 0.0;
+	double reconnectIntervalSeconds = 5.0;
+	bool reconnectMissingLogged = false;
+	bool reconnectCandidateLogged = false;
+
+	bool hasLiveDevice() {
+		return streamActive && getDevice();
+	}
+
+	bool currentDeviceIsDiscoverable() {
+		if (!getDriver() || getDeviceId() < 0)
+			return false;
+
+		std::vector<int> deviceIds = getDeviceIds();
+		bool foundCurrentId = false;
+		for (int deviceId : deviceIds) {
+			if (deviceId == getDeviceId()) {
+				foundCurrentId = true;
+				break;
+			}
+		}
+		if (!foundCurrentId)
+			return false;
+
+		std::string currentName = getDeviceName(getDeviceId());
+		if (currentName.empty())
+			return false;
+		if (!desiredDeviceName.empty() && currentName != desiredDeviceName)
+			return false;
+
+		int availableInputs = getDeviceNumInputs(getDeviceId());
+		int availableOutputs = getDeviceNumOutputs(getDeviceId());
+		if (maxInputs > 0 && availableInputs <= inputOffset)
+			return false;
+		if (maxOutputs > 0 && availableOutputs <= outputOffset)
+			return false;
+
+		return true;
+	}
+
+	bool pollConnectionState() {
+		if (!streamActive || !getDevice())
+			return false;
+		if (currentDeviceIsDiscoverable())
+			return false;
+
+		WARN("RltvtyAudioIO detected live device disappearance for \"%s\" (device ID %d)",
+			desiredDeviceName.empty() ? getDevice()->getName().c_str() : desiredDeviceName.c_str(),
+			getDeviceId());
+		reconnectMissingLogged = false;
+		reconnectCandidateLogged = false;
+		setDeviceId(-1);
+		scheduleReconnect(0.0);
+		return true;
+	}
 
 	void syncLockFromDevice() {
-		if (!getDevice())
+		if (!hasLiveDevice())
 			return;
 		desiredDeviceName = getDevice()->getName();
 		desiredSampleRate = getSampleRate();
 		desiredBlockSize = getBlockSize();
+		reconnectMissingLogged = false;
+		reconnectCandidateLogged = false;
 	}
 
 	void clearLock() {
 		desiredDeviceName.clear();
 		desiredSampleRate = 0.f;
 		desiredBlockSize = 0;
+		nextReconnectAttempt = 0.0;
+		reconnectMissingLogged = false;
+		reconnectCandidateLogged = false;
 	}
 
-	bool reconnectIfAvailable() {
-		if (!autoReconnect || desiredDeviceName.empty() || !getDriver() || getDevice())
-			return false;
+	void scheduleReconnect(double seconds = -1.0) {
+		double delay = (seconds >= 0.0) ? seconds : reconnectIntervalSeconds;
+		nextReconnectAttempt = system::getTime() + delay;
+	}
 
+	bool reconnectIfAvailable(bool force = false) {
+		if (!autoReconnect || desiredDeviceName.empty() || !getDriver() || hasLiveDevice())
+			return false;
+		double now = system::getTime();
+		if (!force && now < nextReconnectAttempt)
+			return false;
+		scheduleReconnect();
+
+		if (getDeviceId() >= 0) {
+			INFO("RltvtyAudioIO clearing stale device state for \"%s\" before reconnect", desiredDeviceName.c_str());
+			setDeviceId(-1);
+		}
+
+		int minInputs = std::max(0, inputOffset + maxInputs);
+		int minOutputs = std::max(0, outputOffset + maxOutputs);
+
+		std::vector<int> matchingDeviceIds;
 		for (int deviceId : getDeviceIds()) {
 			if (getDeviceName(deviceId) != desiredDeviceName)
 				continue;
+			if (getDeviceNumInputs(deviceId) < minInputs)
+				continue;
+			if (getDeviceNumOutputs(deviceId) < minOutputs)
+				continue;
+			matchingDeviceIds.push_back(deviceId);
+		}
+
+		if (matchingDeviceIds.empty()) {
+			if (!reconnectMissingLogged) {
+				INFO("RltvtyAudioIO reconnect waiting for device named \"%s\"", desiredDeviceName.c_str());
+				reconnectMissingLogged = true;
+			}
+			reconnectCandidateLogged = false;
+			return false;
+		}
+
+		reconnectMissingLogged = false;
+
+		if (!reconnectCandidateLogged) {
+			std::string candidates;
+			for (size_t i = 0; i < matchingDeviceIds.size(); i++) {
+				if (i > 0)
+					candidates += ", ";
+				candidates += string::f("%d", matchingDeviceIds[i]);
+			}
+			INFO("RltvtyAudioIO reconnect found device \"%s\" with candidate IDs [%s]", desiredDeviceName.c_str(), candidates.c_str());
+			reconnectCandidateLogged = true;
+		}
+
+		for (int deviceId : matchingDeviceIds) {
+			INFO("RltvtyAudioIO reconnect trying device \"%s\" with ID %d", desiredDeviceName.c_str(), deviceId);
 			setDeviceId(deviceId);
-			if (!getDevice())
-				return false;
+			if (!hasLiveDevice()) {
+				WARN("RltvtyAudioIO reconnect failed for device \"%s\" with ID %d", desiredDeviceName.c_str(), deviceId);
+				continue;
+			}
 			if (desiredSampleRate > 0.f)
 				setSampleRate(desiredSampleRate);
 			if (desiredBlockSize > 0)
 				setBlockSize(desiredBlockSize);
 			syncLockFromDevice();
+			INFO("RltvtyAudioIO reconnect succeeded for device \"%s\"", desiredDeviceName.c_str());
 			return true;
 		}
+
 		return false;
 	}
 
@@ -115,7 +228,8 @@ struct StickyAudioPort : audio::Port {
 		setDriverId(driverId);
 		// Avoid silently binding to the driver's default device when restoring a patch.
 		setDeviceId(-1);
-		reconnectIfAvailable();
+		scheduleReconnect(0.0);
+		reconnectIfAvailable(true);
 	}
 };
 
@@ -228,16 +342,23 @@ struct SplitAudioPort : StickyAudioPort {
 	}
 
 	void onStartStream() override {
+		streamActive = true;
 		engineInputBuffer.clear();
 		engineOutputBuffer.clear();
 	}
 
 	void onStopStream() override {
+		bool wasActive = streamActive;
+		streamActive = false;
 		deviceNumInputs = 0;
 		deviceNumOutputs = 0;
 		deviceSampleRate = 0.f;
 		engineInputBuffer.clear();
 		engineOutputBuffer.clear();
+		if (wasActive && !desiredDeviceName.empty()) {
+			INFO("RltvtyAudioIO stream stopped for device \"%s\"", desiredDeviceName.c_str());
+			scheduleReconnect(0.0);
+		}
 		if (APP->engine->getMasterModule() == module)
 			APP->engine->setMasterModule_NoLock(NULL);
 	}
@@ -272,6 +393,160 @@ static std::string panelTitle(int moduleInputs, int moduleOutputs) {
 		return string::f("Audio In %d", moduleOutputs);
 	return string::f("Audio Out %d", moduleInputs);
 }
+
+static std::string getChannelDetailText(std::string name, int channels, int offset, bool isInput) {
+	std::string text = name;
+	text += " (";
+	if (channels > 0) {
+		text += string::f("%d-%d %s", offset + 1, offset + channels, isInput ? "in" : "out");
+	}
+	text += ")";
+	return text;
+}
+
+
+template <int NUM_MODULE_INPUTS, int NUM_MODULE_OUTPUTS>
+struct SplitAudioDeviceChoice : AudioDeviceChoice {
+	struct ValueItem : MenuItem {
+		StickyAudioPort* port;
+		int deviceId = -1;
+		int inputOffset = 0;
+		int outputOffset = 0;
+		std::string desiredDeviceName;
+
+		void onAction(const ActionEvent& e) override {
+			port->inputOffset = inputOffset;
+			port->outputOffset = outputOffset;
+			port->desiredDeviceName = desiredDeviceName;
+			port->scheduleReconnect(0.0);
+			port->reconnectMissingLogged = false;
+			port->reconnectCandidateLogged = false;
+			port->setDeviceId(deviceId);
+			if (port->getDevice())
+				port->syncLockFromDevice();
+		}
+	};
+
+	void onAction(const ActionEvent& e) override {
+		ui::Menu* menu = createMenu();
+		menu->addChild(createMenuLabel("Audio device"));
+
+		StickyAudioPort* stickyPort = dynamic_cast<StickyAudioPort*>(port);
+		assert(stickyPort);
+
+		ValueItem* noneItem = new ValueItem;
+		noneItem->port = stickyPort;
+		noneItem->deviceId = -1;
+		noneItem->text = "(No device)";
+		noneItem->rightText = CHECKMARK(port->getDeviceId() < 0 && stickyPort->desiredDeviceName.empty());
+		menu->addChild(noneItem);
+
+		const bool wantsInputs = (NUM_MODULE_OUTPUTS > 0);
+		const int channelBlock = wantsInputs ? std::max(1, port->maxInputs) : std::max(1, port->maxOutputs);
+
+		for (int deviceId : port->getDeviceIds()) {
+			int totalChannels = wantsInputs ? port->getDeviceNumInputs(deviceId) : port->getDeviceNumOutputs(deviceId);
+			if (totalChannels <= 0)
+				continue;
+
+			std::string name = port->getDeviceName(deviceId);
+			for (int offset = 0; offset < totalChannels; offset += channelBlock) {
+				int channels = math::clamp(totalChannels - offset, 0, channelBlock);
+				if (channels <= 0)
+					break;
+
+				ValueItem* item = new ValueItem;
+				item->port = stickyPort;
+				item->deviceId = deviceId;
+				item->inputOffset = wantsInputs ? offset : 0;
+				item->outputOffset = wantsInputs ? 0 : offset;
+				item->desiredDeviceName = name;
+				item->text = getChannelDetailText(name, channels, offset, wantsInputs);
+				item->rightText = CHECKMARK(
+					port->getDeviceId() == deviceId &&
+					port->inputOffset == item->inputOffset &&
+					port->outputOffset == item->outputOffset
+				);
+				menu->addChild(item);
+			}
+		}
+	}
+
+	void step() override {
+		StickyAudioPort* stickyPort = dynamic_cast<StickyAudioPort*>(port);
+		if (!stickyPort) {
+			text = "No device";
+			color.a = 0.5;
+			return;
+		}
+
+		const bool wantsInputs = (NUM_MODULE_OUTPUTS > 0);
+		std::string detail;
+		if (stickyPort->hasLiveDevice()) {
+			int channels = wantsInputs ? port->getNumInputs() : port->getNumOutputs();
+			int offset = wantsInputs ? port->inputOffset : port->outputOffset;
+			detail = getChannelDetailText(port->getDevice()->getName(), channels, offset, wantsInputs);
+			color.a = 1.0;
+		}
+		else if (!stickyPort->desiredDeviceName.empty()) {
+			detail = stickyPort->desiredDeviceName + " (missing)";
+			color.a = 0.7;
+		}
+		else {
+			detail = "No device";
+			color.a = 0.5;
+		}
+		text = detail;
+	}
+};
+
+
+template <int NUM_MODULE_INPUTS, int NUM_MODULE_OUTPUTS>
+struct SplitAudioDisplay : LedDisplay {
+	using DeviceChoice = SplitAudioDeviceChoice<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>;
+
+	void setAudioPort(audio::Port* port) {
+		clearChildren();
+
+		math::Vec pos;
+
+		AudioDriverChoice* driverChoice = createWidget<AudioDriverChoice>(pos);
+		driverChoice->box.size.x = box.size.x;
+		driverChoice->port = port;
+		addChild(driverChoice);
+		pos = driverChoice->box.getBottomLeft();
+
+		LedDisplaySeparator* driverSeparator = createWidget<LedDisplaySeparator>(pos);
+		driverSeparator->box.size.x = box.size.x;
+		addChild(driverSeparator);
+
+		DeviceChoice* deviceChoice = createWidget<DeviceChoice>(pos);
+		deviceChoice->box.size.x = box.size.x;
+		deviceChoice->port = port;
+		addChild(deviceChoice);
+		pos = deviceChoice->box.getBottomLeft();
+
+		LedDisplaySeparator* deviceSeparator = createWidget<LedDisplaySeparator>(pos);
+		deviceSeparator->box.size.x = box.size.x;
+		addChild(deviceSeparator);
+
+		AudioSampleRateChoice* sampleRateChoice = createWidget<AudioSampleRateChoice>(pos);
+		sampleRateChoice->box.size.x = box.size.x / 2;
+		sampleRateChoice->port = port;
+		addChild(sampleRateChoice);
+
+		LedDisplaySeparator* sampleRateSeparator = createWidget<LedDisplaySeparator>(pos);
+		sampleRateSeparator->box.pos.x = box.size.x / 2;
+		sampleRateSeparator->box.size.y = sampleRateChoice->box.size.y;
+		addChild(sampleRateSeparator);
+
+		AudioBlockSizeChoice* blockSizeChoice = createWidget<AudioBlockSizeChoice>(pos);
+		blockSizeChoice->box.pos.x = box.size.x / 2;
+		blockSizeChoice->box.size.x = box.size.x / 2;
+		blockSizeChoice->port = port;
+		addChild(blockSizeChoice);
+	}
+};
 
 
 struct SplitPanel : Widget {
@@ -421,7 +696,7 @@ struct SplitAudioWidget : ModuleWidget {
 		addChild(createWidget<ThemedScrew>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 		addChild(createWidget<ThemedScrew>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-		AudioDisplay* display = createWidget<AudioDisplay>(mm2px(Vec(0.0, 13.039)));
+		SplitAudioDisplay<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>* display = createWidget<SplitAudioDisplay<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>>(mm2px(Vec(0.0, 13.039)));
 		display->box.size = Vec(box.size.x, mm2px(29.021f));
 		display->setAudioPort(module ? &module->port : NULL);
 		addChild(display);
@@ -446,9 +721,11 @@ struct SplitAudioWidget : ModuleWidget {
 	void step() override {
 		TModule* module = getModule<TModule>();
 		if (module) {
-			module->port.syncLockFromDevice();
 			auto now = std::chrono::steady_clock::now();
 			if (now >= nextReconnectCheck) {
+				module->port.pollConnectionState();
+				if (module->port.hasLiveDevice())
+					module->port.syncLockFromDevice();
 				module->port.reconnectIfAvailable();
 				nextReconnectCheck = now + std::chrono::seconds(1);
 			}
