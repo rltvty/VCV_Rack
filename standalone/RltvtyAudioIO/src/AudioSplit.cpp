@@ -368,23 +368,8 @@ struct SplitAudioPort : StickyAudioPort {
 static int moduleWidthHp(int channels) {
 	switch (channels) {
 		case 2: return 5;
-		case 8: return 10;
-		default: return 19;
-	}
-}
-
-static int moduleRows(int channels) {
-	switch (channels) {
-		case 2: return 1;
-		case 8: return 2;
-		default: return 4;
-	}
-}
-
-static int moduleCols(int channels) {
-	switch (channels) {
-		case 2: return 2;
-		default: return 4;
+		case 8: return 19;
+		default: return 38;
 	}
 }
 
@@ -593,6 +578,7 @@ struct SplitPanel : Widget {
 template <int NUM_MODULE_INPUTS, int NUM_MODULE_OUTPUTS>
 struct SplitAudioModule : Module {
 	static constexpr int CHANNELS = (NUM_MODULE_INPUTS > 0) ? NUM_MODULE_INPUTS : NUM_MODULE_OUTPUTS;
+	static constexpr int VU_SEGMENTS = 4;
 
 	enum ParamIds {
 		NUM_PARAMS
@@ -606,10 +592,13 @@ struct SplitAudioModule : Module {
 		NUM_OUTPUTS
 	};
 	enum LightIds {
+		ENUMS(VU_LIGHTS, CHANNELS * VU_SEGMENTS),
 		NUM_LIGHTS
 	};
 
 	SplitAudioPort<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS> port;
+	dsp::ClockDivider lightDivider;
+	dsp::VuMeter2 vuMeters[CHANNELS];
 
 	SplitAudioModule() : port(this) {
 		config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS);
@@ -617,6 +606,13 @@ struct SplitAudioModule : Module {
 			configInput(AUDIO_INPUTS + i, string::f("To device output %d", i + 1));
 		for (int i = 0; i < NUM_MODULE_OUTPUTS; i++)
 			configOutput(AUDIO_OUTPUTS + i, string::f("From device input %d", i + 1));
+		for (int i = 0; i < CHANNELS; i++) {
+			configLight(VU_LIGHTS + i * VU_SEGMENTS + 0, string::f("Channel %d meter 0 dB", i + 1));
+			configLight(VU_LIGHTS + i * VU_SEGMENTS + 1, string::f("Channel %d meter -6 dB", i + 1));
+			configLight(VU_LIGHTS + i * VU_SEGMENTS + 2, string::f("Channel %d meter -18 dB", i + 1));
+			configLight(VU_LIGHTS + i * VU_SEGMENTS + 3, string::f("Channel %d meter -36 dB", i + 1));
+		}
+		lightDivider.setDivision(512);
 	}
 
 	~SplitAudioModule() {
@@ -628,6 +624,8 @@ struct SplitAudioModule : Module {
 		port.setDeviceId(-1);
 		port.clearLock();
 		port.autoReconnect = true;
+		for (int i = 0; i < CHANNELS; i++)
+			vuMeters[i].reset();
 	}
 
 	void onSampleRateChange(const SampleRateChangeEvent& e) override {
@@ -645,19 +643,39 @@ struct SplitAudioModule : Module {
 				else if (NUM_MODULE_INPUTS == 2 && i == 1 && inputs[AUDIO_INPUTS + 0].isConnected())
 					v = inputs[AUDIO_INPUTS + 0].getVoltageSum() / 10.f;
 				inputFrame.samples[i] = v;
+				vuMeters[i].process(args.sampleTime, v);
 			}
+			for (int i = port.deviceNumOutputs; i < CHANNELS; i++)
+				vuMeters[i].process(args.sampleTime, 0.f);
 			if (!port.engineInputBuffer.full())
 				port.engineInputBuffer.push(inputFrame);
+		}
+		else if (NUM_MODULE_INPUTS > 0) {
+			for (int i = 0; i < CHANNELS; i++)
+				vuMeters[i].process(args.sampleTime, 0.f);
 		}
 
 		if (NUM_MODULE_OUTPUTS > 0 && !port.engineOutputBuffer.empty()) {
 			dsp::Frame<SplitAudioPort<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>::ENGINE_OUTPUT_CHANNELS> outputFrame = port.engineOutputBuffer.shift();
-			for (int i = 0; i < NUM_MODULE_OUTPUTS; i++)
+			for (int i = 0; i < NUM_MODULE_OUTPUTS; i++) {
 				outputs[AUDIO_OUTPUTS + i].setVoltage(10.f * outputFrame.samples[i]);
+				vuMeters[i].process(args.sampleTime, outputFrame.samples[i]);
+			}
 		}
 		else {
-			for (int i = 0; i < NUM_MODULE_OUTPUTS; i++)
+			for (int i = 0; i < NUM_MODULE_OUTPUTS; i++) {
 				outputs[AUDIO_OUTPUTS + i].setVoltage(0.f);
+				vuMeters[i].process(args.sampleTime, 0.f);
+			}
+		}
+
+		if (lightDivider.process()) {
+			for (int i = 0; i < CHANNELS; i++) {
+				lights[VU_LIGHTS + i * VU_SEGMENTS + 0].setBrightness(vuMeters[i].getBrightness(0, 0));
+				lights[VU_LIGHTS + i * VU_SEGMENTS + 1].setBrightness(vuMeters[i].getBrightness(-6, -3));
+				lights[VU_LIGHTS + i * VU_SEGMENTS + 2].setBrightness(vuMeters[i].getBrightness(-18, -9));
+				lights[VU_LIGHTS + i * VU_SEGMENTS + 3].setBrightness(vuMeters[i].getBrightness(-36, -18));
+			}
 		}
 	}
 
@@ -696,25 +714,30 @@ struct SplitAudioWidget : ModuleWidget {
 		addChild(createWidget<ThemedScrew>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 		addChild(createWidget<ThemedScrew>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-		SplitAudioDisplay<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>* display = createWidget<SplitAudioDisplay<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>>(mm2px(Vec(0.0, 13.039)));
+		const bool isHardwareOutput = (NUM_MODULE_INPUTS > 0);
+		const float displayTopMm = isHardwareOutput ? 88.0f : 13.039f;
+		SplitAudioDisplay<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>* display = createWidget<SplitAudioDisplay<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>>(mm2px(Vec(0.0, displayTopMm)));
 		display->box.size = Vec(box.size.x, mm2px(29.021f));
 		display->setAudioPort(module ? &module->port : NULL);
 		addChild(display);
 
-		const int cols = moduleCols(TModule::CHANNELS);
-		const float startY = mm2px(68.0f);
-		const float rowSpacing = mm2px(15.7f);
-		const float xMargin = mm2px((TModule::CHANNELS == 16) ? 7.8f : 8.2f);
-		const float xSpacing = (cols > 1) ? (box.size.x - 2.f * xMargin) / (cols - 1) : 0.f;
+		const float portY = mm2px(isHardwareOutput ? 54.0f : 105.5f);
+		const float meterBottomY = mm2px(isHardwareOutput ? 75.0f : 93.0f);
+		const float meterSpacing = mm2px(4.2f);
+		const float xMargin = mm2px((TModule::CHANNELS == 16) ? 8.0f : 8.2f);
+		const float xSpacing = (TModule::CHANNELS > 1) ? (box.size.x - 2.f * xMargin) / (TModule::CHANNELS - 1) : 0.f;
 
 		for (int i = 0; i < TModule::CHANNELS; i++) {
-			int row = i / cols;
-			int col = i % cols;
-			Vec pos = Vec(xMargin + col * xSpacing, startY + row * rowSpacing);
+			Vec pos = Vec(xMargin + i * xSpacing, portY);
 			if (NUM_MODULE_INPUTS > 0)
 				addInput(createInputCentered<ThemedPJ301MPort>(pos, module, TModule::AUDIO_INPUTS + i));
 			if (NUM_MODULE_OUTPUTS > 0)
 				addOutput(createOutputCentered<ThemedPJ301MPort>(pos, module, TModule::AUDIO_OUTPUTS + i));
+
+			addChild(createLightCentered<SmallSimpleLight<RedLight>>(Vec(pos.x, meterBottomY - meterSpacing * 3.f), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 0));
+			addChild(createLightCentered<SmallSimpleLight<YellowLight>>(Vec(pos.x, meterBottomY - meterSpacing * 2.f), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 1));
+			addChild(createLightCentered<SmallSimpleLight<GreenLight>>(Vec(pos.x, meterBottomY - meterSpacing), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 2));
+			addChild(createLightCentered<SmallSimpleLight<GreenLight>>(Vec(pos.x, meterBottomY), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 3));
 		}
 	}
 
