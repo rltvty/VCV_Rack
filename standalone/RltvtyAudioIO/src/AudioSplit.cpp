@@ -1,4 +1,5 @@
 #include <chrono>
+#include <vector>
 
 #include "plugin.hpp"
 
@@ -368,8 +369,8 @@ struct SplitAudioPort : StickyAudioPort {
 static int moduleWidthHp(int channels) {
 	switch (channels) {
 		case 2: return 5;
-		case 8: return 19;
-		default: return 38;
+		case 8: return 17;
+		default: return 34;
 	}
 }
 
@@ -575,6 +576,27 @@ struct SplitPanel : Widget {
 };
 
 
+struct ChannelNumberLabel : Widget {
+	std::string text;
+
+	void draw(const DrawArgs& args) override {
+		std::string fontPath = asset::system("res/fonts/Nunito-Bold.ttf");
+		std::shared_ptr<Font> font = APP->window->loadFont(fontPath);
+		if (!font)
+			return;
+
+		nvgSave(args.vg);
+		nvgFontFaceId(args.vg, font->handle);
+		nvgFontSize(args.vg, 11.f);
+		nvgTextLetterSpacing(args.vg, 0.f);
+		nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+		nvgFillColor(args.vg, settings::preferDarkPanels ? nvgRGB(210, 210, 210) : nvgRGB(70, 70, 70));
+		nvgText(args.vg, box.size.x * 0.5f, box.size.y * 0.5f, text.c_str(), NULL);
+		nvgRestore(args.vg);
+	}
+};
+
+
 template <int NUM_MODULE_INPUTS, int NUM_MODULE_OUTPUTS>
 struct SplitAudioModule : Module {
 	static constexpr int CHANNELS = (NUM_MODULE_INPUTS > 0) ? NUM_MODULE_INPUTS : NUM_MODULE_OUTPUTS;
@@ -697,6 +719,27 @@ template <int NUM_MODULE_INPUTS, int NUM_MODULE_OUTPUTS>
 struct SplitAudioWidget : ModuleWidget {
 	using TModule = SplitAudioModule<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>;
 	std::chrono::steady_clock::time_point nextReconnectCheck = std::chrono::steady_clock::now();
+	std::vector<ChannelNumberLabel*> channelLabels;
+
+	std::string getChannelLabelText(TModule* module, int channel) {
+		if (!module)
+			return string::f("%d", channel + 1);
+
+		const bool isHardwareOutput = (NUM_MODULE_INPUTS > 0);
+		int baseChannel = isHardwareOutput ? module->port.outputOffset : module->port.inputOffset;
+		int supportedChannels = isHardwareOutput ? module->port.deviceNumOutputs : module->port.deviceNumInputs;
+
+		if (module->port.hasLiveDevice()) {
+			if (channel < supportedChannels)
+				return string::f("%d", baseChannel + channel + 1);
+			return "N/A";
+		}
+
+		if (!module->port.desiredDeviceName.empty())
+			return string::f("%d", baseChannel + channel + 1);
+
+		return string::f("%d", channel + 1);
+	}
 
 	SplitAudioWidget(TModule* module) {
 		setModule(module);
@@ -721,10 +764,15 @@ struct SplitAudioWidget : ModuleWidget {
 		display->setAudioPort(module ? &module->port : NULL);
 		addChild(display);
 
-		const float portY = mm2px(isHardwareOutput ? 54.0f : 105.5f);
-		const float meterBottomY = mm2px(isHardwareOutput ? 75.0f : 93.0f);
+		const float portY = mm2px(isHardwareOutput ? 23.0f : 105.5f);
+		const float meterBottomY = mm2px(isHardwareOutput ? 48.0f : 93.0f);
 		const float meterSpacing = mm2px(4.2f);
-		const float xMargin = mm2px((TModule::CHANNELS == 16) ? 8.0f : 8.2f);
+		const float topMeterY = meterBottomY - meterSpacing * 3.f;
+		const float labelNudgeY = mm2px(isHardwareOutput ? 1.2f : -1.0f);
+		const float labelCenterY = isHardwareOutput
+			? 0.5f * (portY + topMeterY) + labelNudgeY
+			: 0.5f * (portY + meterBottomY) + labelNudgeY;
+		const float xMargin = mm2px((TModule::CHANNELS == 16) ? 6.5f : 7.0f);
 		const float xSpacing = (TModule::CHANNELS > 1) ? (box.size.x - 2.f * xMargin) / (TModule::CHANNELS - 1) : 0.f;
 
 		for (int i = 0; i < TModule::CHANNELS; i++) {
@@ -734,7 +782,13 @@ struct SplitAudioWidget : ModuleWidget {
 			if (NUM_MODULE_OUTPUTS > 0)
 				addOutput(createOutputCentered<ThemedPJ301MPort>(pos, module, TModule::AUDIO_OUTPUTS + i));
 
-			addChild(createLightCentered<SmallSimpleLight<RedLight>>(Vec(pos.x, meterBottomY - meterSpacing * 3.f), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 0));
+			ChannelNumberLabel* label = createWidget<ChannelNumberLabel>(Vec(pos.x - 10.f, labelCenterY - 7.f));
+			label->box.size = Vec(20.f, 14.f);
+			label->text = getChannelLabelText(module, i);
+			addChild(label);
+			channelLabels.push_back(label);
+
+			addChild(createLightCentered<SmallSimpleLight<RedLight>>(Vec(pos.x, topMeterY), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 0));
 			addChild(createLightCentered<SmallSimpleLight<YellowLight>>(Vec(pos.x, meterBottomY - meterSpacing * 2.f), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 1));
 			addChild(createLightCentered<SmallSimpleLight<GreenLight>>(Vec(pos.x, meterBottomY - meterSpacing), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 2));
 			addChild(createLightCentered<SmallSimpleLight<GreenLight>>(Vec(pos.x, meterBottomY), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 3));
@@ -751,6 +805,9 @@ struct SplitAudioWidget : ModuleWidget {
 					module->port.syncLockFromDevice();
 				module->port.reconnectIfAvailable();
 				nextReconnectCheck = now + std::chrono::seconds(1);
+			}
+			for (size_t i = 0; i < channelLabels.size(); i++) {
+				channelLabels[i]->text = getChannelLabelText(module, (int) i);
 			}
 		}
 		ModuleWidget::step();
