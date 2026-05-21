@@ -369,7 +369,7 @@ struct SplitAudioPort : StickyAudioPort {
 static int moduleWidthHp(int channels) {
 	switch (channels) {
 		case 2: return 5;
-		case 8: return 17;
+		case 8: return 27;
 		default: return 34;
 	}
 }
@@ -490,53 +490,85 @@ struct SplitAudioDeviceChoice : AudioDeviceChoice {
 template <int NUM_MODULE_INPUTS, int NUM_MODULE_OUTPUTS>
 struct SplitAudioDisplay : LedDisplay {
 	using DeviceChoice = SplitAudioDeviceChoice<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>;
+	static constexpr int CHANNELS = (NUM_MODULE_INPUTS > 0) ? NUM_MODULE_INPUTS : NUM_MODULE_OUTPUTS;
 
 	void setAudioPort(audio::Port* port) {
 		clearChildren();
 
-		math::Vec pos;
+		auto configureChoice = [&](LedDisplayChoice* choice, float x, float y, float w, float h) {
+			choice->box.pos = math::Vec(x, y);
+			choice->box.size = math::Vec(w, h);
+			choice->textOffset = math::Vec(8.f, h * 0.68f);
+			addChild(choice);
+		};
+		auto addVerticalSeparator = [&](float x, float y, float h) {
+			LedDisplaySeparator* separator = createWidget<LedDisplaySeparator>(math::Vec(x, y));
+			separator->box.size = math::Vec(0.f, h);
+			addChild(separator);
+		};
+		auto addHorizontalSeparator = [&](float y) {
+			LedDisplaySeparator* separator = createWidget<LedDisplaySeparator>(math::Vec(0.f, y));
+			separator->box.size = math::Vec(box.size.x, 0.f);
+			addChild(separator);
+		};
 
-		AudioDriverChoice* driverChoice = createWidget<AudioDriverChoice>(pos);
-		driverChoice->box.size.x = box.size.x;
+		if (CHANNELS == 2) {
+			const float rowHeight = box.size.y / 4.f;
+
+			AudioDriverChoice* driverChoice = createWidget<AudioDriverChoice>(math::Vec());
+			driverChoice->port = port;
+			configureChoice(driverChoice, 0.f, 0.f, box.size.x, rowHeight);
+			addHorizontalSeparator(rowHeight);
+
+			DeviceChoice* deviceChoice = createWidget<DeviceChoice>(math::Vec());
+			deviceChoice->port = port;
+			configureChoice(deviceChoice, 0.f, rowHeight, box.size.x, rowHeight);
+			addHorizontalSeparator(rowHeight * 2.f);
+
+			AudioSampleRateChoice* sampleRateChoice = createWidget<AudioSampleRateChoice>(math::Vec());
+			sampleRateChoice->port = port;
+			configureChoice(sampleRateChoice, 0.f, rowHeight * 2.f, box.size.x, rowHeight);
+			addHorizontalSeparator(rowHeight * 3.f);
+
+			AudioBlockSizeChoice* blockSizeChoice = createWidget<AudioBlockSizeChoice>(math::Vec());
+			blockSizeChoice->port = port;
+			configureChoice(blockSizeChoice, 0.f, rowHeight * 3.f, box.size.x, rowHeight);
+			return;
+		}
+
+		const float rowHeight = box.size.y / 2.f;
+		const float colWidth = box.size.x / 2.f;
+
+		AudioDriverChoice* driverChoice = createWidget<AudioDriverChoice>(math::Vec());
 		driverChoice->port = port;
-		addChild(driverChoice);
-		pos = driverChoice->box.getBottomLeft();
+		configureChoice(driverChoice, 0.f, 0.f, colWidth, rowHeight);
 
-		LedDisplaySeparator* driverSeparator = createWidget<LedDisplaySeparator>(pos);
-		driverSeparator->box.size.x = box.size.x;
-		addChild(driverSeparator);
-
-		DeviceChoice* deviceChoice = createWidget<DeviceChoice>(pos);
-		deviceChoice->box.size.x = box.size.x;
+		DeviceChoice* deviceChoice = createWidget<DeviceChoice>(math::Vec());
 		deviceChoice->port = port;
-		addChild(deviceChoice);
-		pos = deviceChoice->box.getBottomLeft();
+		configureChoice(deviceChoice, colWidth, 0.f, colWidth, rowHeight);
 
-		LedDisplaySeparator* deviceSeparator = createWidget<LedDisplaySeparator>(pos);
-		deviceSeparator->box.size.x = box.size.x;
-		addChild(deviceSeparator);
+		addVerticalSeparator(colWidth, 0.f, rowHeight);
+		addHorizontalSeparator(rowHeight);
 
-		AudioSampleRateChoice* sampleRateChoice = createWidget<AudioSampleRateChoice>(pos);
-		sampleRateChoice->box.size.x = box.size.x / 2;
+		AudioSampleRateChoice* sampleRateChoice = createWidget<AudioSampleRateChoice>(math::Vec());
 		sampleRateChoice->port = port;
-		addChild(sampleRateChoice);
+		configureChoice(sampleRateChoice, 0.f, rowHeight, colWidth, rowHeight);
 
-		LedDisplaySeparator* sampleRateSeparator = createWidget<LedDisplaySeparator>(pos);
-		sampleRateSeparator->box.pos.x = box.size.x / 2;
-		sampleRateSeparator->box.size.y = sampleRateChoice->box.size.y;
-		addChild(sampleRateSeparator);
-
-		AudioBlockSizeChoice* blockSizeChoice = createWidget<AudioBlockSizeChoice>(pos);
-		blockSizeChoice->box.pos.x = box.size.x / 2;
-		blockSizeChoice->box.size.x = box.size.x / 2;
+		AudioBlockSizeChoice* blockSizeChoice = createWidget<AudioBlockSizeChoice>(math::Vec());
 		blockSizeChoice->port = port;
-		addChild(blockSizeChoice);
+		configureChoice(blockSizeChoice, colWidth, rowHeight, colWidth, rowHeight);
+
+		addVerticalSeparator(colWidth, rowHeight, rowHeight);
 	}
 };
 
 
 struct SplitPanel : Widget {
 	std::string title;
+	bool hasMasterSection = false;
+	float masterSectionWidth = 0.f;
+	float masterSectionDividerTop = 34.f;
+	float masterSectionDividerBottom = 0.f;
 
 	void draw(const DrawArgs& args) override {
 		NVGcolor bg = settings::preferDarkPanels ? nvgRGB(42, 42, 42) : nvgRGB(235, 235, 235);
@@ -553,6 +585,35 @@ struct SplitPanel : Widget {
 		nvgStrokeWidth(args.vg, 1.f);
 		nvgStrokeColor(args.vg, border);
 		nvgStroke(args.vg);
+
+		if (hasMasterSection && masterSectionWidth > 0.f) {
+			float x = masterSectionWidth;
+			NVGcolor dividerDark = settings::preferDarkPanels ? nvgRGB(58, 58, 58) : nvgRGB(150, 150, 150);
+			NVGcolor dividerLight = settings::preferDarkPanels ? nvgRGB(95, 95, 95) : nvgRGB(210, 210, 210);
+			float yTop = masterSectionDividerTop;
+			float yBottom = (masterSectionDividerBottom > 0.f) ? masterSectionDividerBottom : (box.size.y - 12.f);
+
+			nvgBeginPath(args.vg);
+			nvgMoveTo(args.vg, x - 1.5f, yTop);
+			nvgLineTo(args.vg, x - 1.5f, yBottom);
+			nvgStrokeWidth(args.vg, 1.f);
+			nvgStrokeColor(args.vg, dividerLight);
+			nvgStroke(args.vg);
+
+			nvgBeginPath(args.vg);
+			nvgMoveTo(args.vg, x, yTop);
+			nvgLineTo(args.vg, x, yBottom);
+			nvgStrokeWidth(args.vg, 1.f);
+			nvgStrokeColor(args.vg, dividerDark);
+			nvgStroke(args.vg);
+
+			nvgBeginPath(args.vg);
+			nvgMoveTo(args.vg, x + 1.5f, yTop);
+			nvgLineTo(args.vg, x + 1.5f, yBottom);
+			nvgStrokeWidth(args.vg, 1.f);
+			nvgStrokeColor(args.vg, dividerLight);
+			nvgStroke(args.vg);
+		}
 
 		std::string fontPath = asset::system("res/fonts/Nunito-Bold.ttf");
 		std::shared_ptr<Font> font = APP->window->loadFont(fontPath);
@@ -597,12 +658,68 @@ struct ChannelNumberLabel : Widget {
 };
 
 
+struct SmallTextLabel : Widget {
+	std::string text;
+	float fontSize = 9.f;
+	NVGcolor color = nvgRGB(70, 70, 70);
+	bool leftAlign = false;
+	bool rightAlign = false;
+
+	void draw(const DrawArgs& args) override {
+		std::string fontPath = asset::system("res/fonts/Nunito-Bold.ttf");
+		std::shared_ptr<Font> font = APP->window->loadFont(fontPath);
+		if (!font)
+			return;
+
+		nvgSave(args.vg);
+		nvgFontFaceId(args.vg, font->handle);
+		nvgFontSize(args.vg, fontSize);
+		nvgTextLetterSpacing(args.vg, 0.f);
+		int align = NVG_ALIGN_CENTER;
+		if (leftAlign)
+			align = NVG_ALIGN_LEFT;
+		else if (rightAlign)
+			align = NVG_ALIGN_RIGHT;
+		nvgTextAlign(args.vg, align | NVG_ALIGN_MIDDLE);
+		nvgFillColor(args.vg, color);
+		float textX = box.size.x * 0.5f;
+		if (leftAlign)
+			textX = 0.f;
+		else if (rightAlign)
+			textX = box.size.x;
+		nvgText(args.vg, textX, box.size.y * 0.5f, text.c_str(), NULL);
+		nvgRestore(args.vg);
+	}
+};
+
+template <typename TBase = GrayModuleLightWidget>
+struct TMagentaLight : TBase {
+	TMagentaLight() {
+		this->addBaseColor(nvgRGB(0xd9, 0x3d, 0xff));
+	}
+};
+using MagentaLight = TMagentaLight<>;
+
+template <typename TBase = GrayModuleLightWidget>
+struct VuSimpleLight : TBase {
+	VuSimpleLight() {
+		this->box.size = mm2px(math::Vec(2.2, 2.2));
+	}
+};
+
+
 template <int NUM_MODULE_INPUTS, int NUM_MODULE_OUTPUTS>
 struct SplitAudioModule : Module {
 	static constexpr int CHANNELS = (NUM_MODULE_INPUTS > 0) ? NUM_MODULE_INPUTS : NUM_MODULE_OUTPUTS;
-	static constexpr int VU_SEGMENTS = 4;
+	static constexpr bool HAS_GAIN_UI = (CHANNELS == 8);
+	static constexpr int VU_SEGMENTS = HAS_GAIN_UI ? 9 : 4;
 
 	enum ParamIds {
+		MASTER_GAIN_PARAM,
+		METER_TAP_PARAM,
+		CLIP_RESET_PARAM,
+		CLIP_RESET_TIME_PARAM,
+		ENUMS(CHANNEL_GAIN_PARAMS, CHANNELS),
 		NUM_PARAMS
 	};
 	enum InputIds {
@@ -614,6 +731,7 @@ struct SplitAudioModule : Module {
 		NUM_OUTPUTS
 	};
 	enum LightIds {
+		ENUMS(CLIP_LIGHTS, CHANNELS),
 		ENUMS(VU_LIGHTS, CHANNELS * VU_SEGMENTS),
 		NUM_LIGHTS
 	};
@@ -621,18 +739,121 @@ struct SplitAudioModule : Module {
 	SplitAudioPort<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS> port;
 	dsp::ClockDivider lightDivider;
 	dsp::VuMeter2 vuMeters[CHANNELS];
+	dsp::SchmittTrigger clipResetTrigger;
+	bool clipLatched[CHANNELS] = {};
+	float clipResetTimers[CHANNELS] = {};
+
+	static float dbToGain(float db) {
+		return std::pow(10.f, db / 20.f);
+	}
+
+	float getMasterGainDb() {
+		return params[MASTER_GAIN_PARAM].getValue();
+	}
+
+	float getChannelGainDb(int channel) {
+		return params[CHANNEL_GAIN_PARAMS + channel].getValue();
+	}
+
+	float getTotalGainDb(int channel) {
+		return getMasterGainDb() + getChannelGainDb(channel);
+	}
+
+	float applyGain(float sample, int channel) {
+		return sample * dbToGain(getTotalGainDb(channel));
+	}
+
+	bool isMeterPostGain() {
+		return params[METER_TAP_PARAM].getValue() < 0.5f;
+	}
+
+	float getClipSample(float preGainSample, float postGainSample) {
+		// Audio In modules expose hardware inputs as module outputs, so they use
+		// NUM_MODULE_OUTPUTS > 0 and should indicate ADC/full-scale clipping
+		// before digital boost.
+		if (NUM_MODULE_OUTPUTS > 0)
+			return preGainSample;
+		// Audio Out modules expose hardware outputs as module inputs, so they use
+		// NUM_MODULE_INPUTS > 0 and should indicate DAC/full-scale clipping after
+		// output gain.
+		return postGainSample;
+	}
+
+	float getClipAutoResetSeconds() {
+		if (!HAS_GAIN_UI)
+			return 0.f;
+		int mode = (int) std::round(params[CLIP_RESET_TIME_PARAM].getValue());
+		switch (mode) {
+			case 0:
+				return 3.f;
+			case 1:
+				return 10.f;
+			default:
+				return 0.f;
+		}
+	}
+
+	void clearClip(int channel) {
+		clipLatched[channel] = false;
+		clipResetTimers[channel] = 0.f;
+	}
+
+	void clearClips() {
+		for (int i = 0; i < CHANNELS; i++)
+			clearClip(i);
+	}
+
+	void triggerClip(int channel) {
+		clipLatched[channel] = true;
+		clipResetTimers[channel] = getClipAutoResetSeconds();
+	}
+
+	void detectClip(int channel, float sample) {
+		if (!HAS_GAIN_UI)
+			return;
+		if (std::fabs(sample) >= 1.f)
+			triggerClip(channel);
+	}
+
+	void processClipTimers(float sampleTime) {
+		if (!HAS_GAIN_UI)
+			return;
+
+		float autoResetSeconds = getClipAutoResetSeconds();
+		if (autoResetSeconds <= 0.f)
+			return;
+
+		for (int i = 0; i < CHANNELS; i++) {
+			if (!clipLatched[i])
+				continue;
+			if (clipResetTimers[i] <= 0.f || clipResetTimers[i] > autoResetSeconds)
+				clipResetTimers[i] = autoResetSeconds;
+			clipResetTimers[i] -= sampleTime;
+			if (clipResetTimers[i] <= 0.f)
+				clearClip(i);
+		}
+	}
 
 	SplitAudioModule() : port(this) {
 		config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS);
+		configParam(MASTER_GAIN_PARAM, -12.f, 12.f, 0.f, "Master gain", " dB");
+		getParamQuantity(MASTER_GAIN_PARAM)->snapEnabled = true;
+		configSwitch(METER_TAP_PARAM, 0.f, 1.f, 1.f, "Meter tap", {"Post-gain", "Pre-gain"});
+		configButton(CLIP_RESET_PARAM, "Reset clip indicators");
+		configSwitch(CLIP_RESET_TIME_PARAM, 0.f, 2.f, 2.f, "Clip indicator reset mode", {"3 seconds", "10 seconds", "Manual"});
+		for (int i = 0; i < CHANNELS; i++) {
+			configParam(CHANNEL_GAIN_PARAMS + i, -12.f, 12.f, 0.f, string::f("Channel %d gain", i + 1), " dB");
+			getParamQuantity(CHANNEL_GAIN_PARAMS + i)->snapEnabled = true;
+		}
 		for (int i = 0; i < NUM_MODULE_INPUTS; i++)
 			configInput(AUDIO_INPUTS + i, string::f("To device output %d", i + 1));
 		for (int i = 0; i < NUM_MODULE_OUTPUTS; i++)
 			configOutput(AUDIO_OUTPUTS + i, string::f("From device input %d", i + 1));
 		for (int i = 0; i < CHANNELS; i++) {
-			configLight(VU_LIGHTS + i * VU_SEGMENTS + 0, string::f("Channel %d meter 0 dB", i + 1));
-			configLight(VU_LIGHTS + i * VU_SEGMENTS + 1, string::f("Channel %d meter -6 dB", i + 1));
-			configLight(VU_LIGHTS + i * VU_SEGMENTS + 2, string::f("Channel %d meter -18 dB", i + 1));
-			configLight(VU_LIGHTS + i * VU_SEGMENTS + 3, string::f("Channel %d meter -36 dB", i + 1));
+			configLight(CLIP_LIGHTS + i, string::f("Channel %d clip indicator", i + 1));
+			for (int seg = 0; seg < VU_SEGMENTS; seg++) {
+				configLight(VU_LIGHTS + i * VU_SEGMENTS + seg, string::f("Channel %d meter segment %d", i + 1, seg + 1));
+			}
 		}
 		lightDivider.setDivision(512);
 	}
@@ -648,6 +869,7 @@ struct SplitAudioModule : Module {
 		port.autoReconnect = true;
 		for (int i = 0; i < CHANNELS; i++)
 			vuMeters[i].reset();
+		clearClips();
 	}
 
 	void onSampleRateChange(const SampleRateChangeEvent& e) override {
@@ -656,6 +878,10 @@ struct SplitAudioModule : Module {
 	}
 
 	void process(const ProcessArgs& args) override {
+		if (HAS_GAIN_UI && clipResetTrigger.process(params[CLIP_RESET_PARAM].getValue()))
+			clearClips();
+		processClipTimers(args.sampleTime);
+
 		if (NUM_MODULE_INPUTS > 0 && port.deviceNumOutputs > 0) {
 			dsp::Frame<SplitAudioPort<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>::ENGINE_INPUT_CHANNELS> inputFrame = {};
 			for (int i = 0; i < port.deviceNumOutputs; i++) {
@@ -664,8 +890,12 @@ struct SplitAudioModule : Module {
 					v = inputs[AUDIO_INPUTS + i].getVoltageSum() / 10.f;
 				else if (NUM_MODULE_INPUTS == 2 && i == 1 && inputs[AUDIO_INPUTS + 0].isConnected())
 					v = inputs[AUDIO_INPUTS + 0].getVoltageSum() / 10.f;
-				inputFrame.samples[i] = v;
-				vuMeters[i].process(args.sampleTime, v);
+				float gainedV = applyGain(v, i);
+				float meterSample = isMeterPostGain() ? gainedV : v;
+				float clipSample = getClipSample(v, gainedV);
+				inputFrame.samples[i] = gainedV;
+				vuMeters[i].process(args.sampleTime, meterSample);
+				detectClip(i, clipSample);
 			}
 			for (int i = port.deviceNumOutputs; i < CHANNELS; i++)
 				vuMeters[i].process(args.sampleTime, 0.f);
@@ -680,8 +910,13 @@ struct SplitAudioModule : Module {
 		if (NUM_MODULE_OUTPUTS > 0 && !port.engineOutputBuffer.empty()) {
 			dsp::Frame<SplitAudioPort<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>::ENGINE_OUTPUT_CHANNELS> outputFrame = port.engineOutputBuffer.shift();
 			for (int i = 0; i < NUM_MODULE_OUTPUTS; i++) {
-				outputs[AUDIO_OUTPUTS + i].setVoltage(10.f * outputFrame.samples[i]);
-				vuMeters[i].process(args.sampleTime, outputFrame.samples[i]);
+				float rawV = outputFrame.samples[i];
+				float gainedV = applyGain(rawV, i);
+				float meterSample = isMeterPostGain() ? gainedV : rawV;
+				float clipSample = getClipSample(rawV, gainedV);
+				outputs[AUDIO_OUTPUTS + i].setVoltage(10.f * gainedV);
+				vuMeters[i].process(args.sampleTime, meterSample);
+				detectClip(i, clipSample);
 			}
 		}
 		else {
@@ -693,10 +928,24 @@ struct SplitAudioModule : Module {
 
 		if (lightDivider.process()) {
 			for (int i = 0; i < CHANNELS; i++) {
-				lights[VU_LIGHTS + i * VU_SEGMENTS + 0].setBrightness(vuMeters[i].getBrightness(0, 0));
-				lights[VU_LIGHTS + i * VU_SEGMENTS + 1].setBrightness(vuMeters[i].getBrightness(-6, -3));
-				lights[VU_LIGHTS + i * VU_SEGMENTS + 2].setBrightness(vuMeters[i].getBrightness(-18, -9));
-				lights[VU_LIGHTS + i * VU_SEGMENTS + 3].setBrightness(vuMeters[i].getBrightness(-36, -18));
+				lights[CLIP_LIGHTS + i].setBrightness(clipLatched[i] ? 1.f : 0.f);
+				if (HAS_GAIN_UI) {
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 0].setBrightness(vuMeters[i].getBrightness(0.f, 0.f));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 1].setBrightness(vuMeters[i].getBrightness(-1.f, -0.5f));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 2].setBrightness(vuMeters[i].getBrightness(-3.f, -1.5f));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 3].setBrightness(vuMeters[i].getBrightness(-6.f, -3.f));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 4].setBrightness(vuMeters[i].getBrightness(-9.f, -6.f));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 5].setBrightness(vuMeters[i].getBrightness(-12.f, -9.f));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 6].setBrightness(vuMeters[i].getBrightness(-18.f, -12.f));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 7].setBrightness(vuMeters[i].getBrightness(-24.f, -18.f));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 8].setBrightness(vuMeters[i].getBrightness(-36.f, -24.f));
+				}
+				else {
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 0].setBrightness(vuMeters[i].getBrightness(0, 0));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 1].setBrightness(vuMeters[i].getBrightness(-6, -3));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 2].setBrightness(vuMeters[i].getBrightness(-18, -9));
+					lights[VU_LIGHTS + i * VU_SEGMENTS + 3].setBrightness(vuMeters[i].getBrightness(-36, -18));
+				}
 			}
 		}
 	}
@@ -749,6 +998,8 @@ struct SplitAudioWidget : ModuleWidget {
 
 		SplitPanel* panel = new SplitPanel;
 		panel->title = panelTitle(NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS);
+		panel->hasMasterSection = TModule::HAS_GAIN_UI;
+		panel->masterSectionWidth = TModule::HAS_GAIN_UI ? (6.f * RACK_GRID_WIDTH) : 0.f;
 		panel->box.size = box.size;
 		addChild(panel);
 
@@ -758,40 +1009,185 @@ struct SplitAudioWidget : ModuleWidget {
 		addChild(createWidget<ThemedScrew>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
 		const bool isHardwareOutput = (NUM_MODULE_INPUTS > 0);
+		const float displayHeightMm = (TModule::CHANNELS == 2) ? 29.021f : (56.f / 3.f);
 		const float displayTopMm = isHardwareOutput ? 88.0f : 13.039f;
+		const float displayBottomMm = displayTopMm + displayHeightMm;
 		SplitAudioDisplay<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>* display = createWidget<SplitAudioDisplay<NUM_MODULE_INPUTS, NUM_MODULE_OUTPUTS>>(mm2px(Vec(0.0, displayTopMm)));
-		display->box.size = Vec(box.size.x, mm2px(29.021f));
+		display->box.size = Vec(box.size.x, mm2px(displayHeightMm));
 		display->setAudioPort(module ? &module->port : NULL);
 		addChild(display);
+		if (TModule::HAS_GAIN_UI) {
+			panel->masterSectionDividerTop = isHardwareOutput ? 34.f : mm2px(displayBottomMm + 4.f);
+			panel->masterSectionDividerBottom = isHardwareOutput ? mm2px(displayTopMm - 4.f) : (box.size.y - 12.f);
+		}
 
-		const float portY = mm2px(isHardwareOutput ? 23.0f : 105.5f);
-		const float meterBottomY = mm2px(isHardwareOutput ? 48.0f : 93.0f);
-		const float meterSpacing = mm2px(4.2f);
-		const float topMeterY = meterBottomY - meterSpacing * 3.f;
-		const float labelNudgeY = mm2px(isHardwareOutput ? 1.2f : -1.0f);
-		const float labelCenterY = isHardwareOutput
-			? 0.5f * (portY + topMeterY) + labelNudgeY
-			: 0.5f * (portY + meterBottomY) + labelNudgeY;
-		const float xMargin = mm2px((TModule::CHANNELS == 16) ? 6.5f : 7.0f);
-		const float xSpacing = (TModule::CHANNELS > 1) ? (box.size.x - 2.f * xMargin) / (TModule::CHANNELS - 1) : 0.f;
+		float portY = mm2px(isHardwareOutput ? 23.0f : 105.5f);
+		float numberY = isHardwareOutput ? mm2px(35.0f) : mm2px(82.0f);
+		float gainY = mm2px(isHardwareOutput ? 67.0f : 56.0f);
+		float topMeterY = mm2px(isHardwareOutput ? 23.0f : 80.0f);
+		float meterSpacing = mm2px(4.2f);
+		float clipLightY = topMeterY - mm2px(5.8f);
+		const float masterStripWidth = TModule::HAS_GAIN_UI ? (6.f * RACK_GRID_WIDTH) : 0.f;
+		if (TModule::HAS_GAIN_UI) {
+			if (isHardwareOutput) {
+				portY = mm2px(15.5f);
+				numberY = mm2px(22.5f);
+				gainY = mm2px(30.5f);
+				topMeterY = mm2px(52.0f);
+				meterSpacing = mm2px(3.725f);
+			}
+			else {
+				clipLightY = mm2px(47.5f);
+				topMeterY = mm2px(53.0f);
+				meterSpacing = mm2px(3.825f);
+				gainY = mm2px(103.0f);
+				numberY = mm2px(111.0f);
+				portY = mm2px(118.0f);
+			}
+			if (isHardwareOutput)
+				clipLightY = mm2px(45.5f);
+		}
+		const float meterBottomY = topMeterY + meterSpacing * (TModule::VU_SEGMENTS - 1);
+		const float channelAreaWidth = box.size.x - masterStripWidth;
+		const float baseChannelMargin = mm2px((TModule::CHANNELS == 16) ? 6.5f : 8.2f);
+		const float leftChannelMargin = masterStripWidth + baseChannelMargin;
+		const float rightChannelMargin = mm2px((TModule::CHANNELS == 16) ? 6.5f : 7.0f);
+		const float xSpacing = (TModule::CHANNELS > 1) ? (channelAreaWidth - baseChannelMargin - rightChannelMargin) / (TModule::CHANNELS - 1) : 0.f;
+
+		if (TModule::HAS_GAIN_UI) {
+			const float masterX = masterStripWidth * 0.5f;
+			const float masterTextX = 2.f;
+			const float masterTextWidth = masterX - masterTextX - 10.f;
+			const float masterGainY = gainY;
+			const float clipResetY = clipLightY;
+			const float clipModeY = topMeterY + meterSpacing * 2.5f;
+			const float meterSwitchY = topMeterY + meterSpacing * 6.9f;
+
+			ChannelNumberLabel* masterLabel = createWidget<ChannelNumberLabel>(Vec(0.f, numberY - 7.f));
+			masterLabel->box.size = Vec(masterStripWidth, 14.f);
+			masterLabel->text = "MAIN";
+			addChild(masterLabel);
+
+			addParam(createParamCentered<RoundLargeBlackKnob>(Vec(masterX, masterGainY), module, TModule::MASTER_GAIN_PARAM));
+
+			SmallTextLabel* preLabel = createWidget<SmallTextLabel>(Vec(masterX + 10.f, meterSwitchY - 15.f));
+			preLabel->box.size = Vec(28.f, 10.f);
+			preLabel->text = "PRE";
+			preLabel->fontSize = 8.5f;
+			preLabel->leftAlign = true;
+			preLabel->color = settings::preferDarkPanels ? nvgRGB(176, 176, 176) : nvgRGB(96, 96, 96);
+			addChild(preLabel);
+
+			SmallTextLabel* postLabel = createWidget<SmallTextLabel>(Vec(masterX + 10.f, meterSwitchY + 5.f));
+			postLabel->box.size = Vec(32.f, 10.f);
+			postLabel->text = "POST";
+			postLabel->fontSize = 8.5f;
+			postLabel->leftAlign = true;
+			postLabel->color = settings::preferDarkPanels ? nvgRGB(176, 176, 176) : nvgRGB(96, 96, 96);
+			addChild(postLabel);
+
+			addParam(createParamCentered<CKSS>(Vec(masterX, meterSwitchY), module, TModule::METER_TAP_PARAM));
+
+			SmallTextLabel* autoLabel = createWidget<SmallTextLabel>(Vec(masterTextX, clipModeY - 11.f));
+			autoLabel->box.size = Vec(masterTextWidth, 10.f);
+			autoLabel->text = "Auto";
+			autoLabel->fontSize = 8.5f;
+			autoLabel->rightAlign = true;
+			autoLabel->color = settings::preferDarkPanels ? nvgRGB(198, 198, 198) : nvgRGB(82, 82, 82);
+			addChild(autoLabel);
+
+			SmallTextLabel* autoResetLabel = createWidget<SmallTextLabel>(Vec(masterTextX, clipModeY + 2.f));
+			autoResetLabel->box.size = Vec(masterTextWidth, 10.f);
+			autoResetLabel->text = "Reset";
+			autoResetLabel->fontSize = 8.5f;
+			autoResetLabel->rightAlign = true;
+			autoResetLabel->color = settings::preferDarkPanels ? nvgRGB(198, 198, 198) : nvgRGB(82, 82, 82);
+			addChild(autoResetLabel);
+
+			SmallTextLabel* auto3Label = createWidget<SmallTextLabel>(Vec(masterX + 10.f, clipModeY - 12.f));
+			auto3Label->box.size = Vec(28.f, 9.f);
+			auto3Label->text = "OFF";
+			auto3Label->fontSize = 8.0f;
+			auto3Label->leftAlign = true;
+			auto3Label->color = settings::preferDarkPanels ? nvgRGB(176, 176, 176) : nvgRGB(96, 96, 96);
+			addChild(auto3Label);
+
+			SmallTextLabel* auto10Label = createWidget<SmallTextLabel>(Vec(masterX + 10.f, clipModeY - 1.f));
+			auto10Label->box.size = Vec(28.f, 9.f);
+			auto10Label->text = "10s";
+			auto10Label->fontSize = 8.0f;
+			auto10Label->leftAlign = true;
+			auto10Label->color = settings::preferDarkPanels ? nvgRGB(176, 176, 176) : nvgRGB(96, 96, 96);
+			addChild(auto10Label);
+
+			SmallTextLabel* autoOffLabel = createWidget<SmallTextLabel>(Vec(masterX + 10.f, clipModeY + 10.f));
+			autoOffLabel->box.size = Vec(28.f, 9.f);
+			autoOffLabel->text = "3s";
+			autoOffLabel->fontSize = 8.0f;
+			autoOffLabel->leftAlign = true;
+			autoOffLabel->color = settings::preferDarkPanels ? nvgRGB(176, 176, 176) : nvgRGB(96, 96, 96);
+			addChild(autoOffLabel);
+
+			addParam(createParamCentered<CKSSThree>(Vec(masterX, clipModeY), module, TModule::CLIP_RESET_TIME_PARAM));
+
+			SmallTextLabel* manualLabel = createWidget<SmallTextLabel>(Vec(masterTextX, clipResetY - 11.f));
+			manualLabel->box.size = Vec(masterTextWidth, 10.f);
+			manualLabel->text = "Manual";
+			manualLabel->fontSize = 8.5f;
+			manualLabel->rightAlign = true;
+			manualLabel->color = settings::preferDarkPanels ? nvgRGB(198, 198, 198) : nvgRGB(82, 82, 82);
+			addChild(manualLabel);
+
+			SmallTextLabel* resetLabel = createWidget<SmallTextLabel>(Vec(masterTextX, clipResetY + 2.f));
+			resetLabel->box.size = Vec(masterTextWidth, 10.f);
+			resetLabel->text = "Reset";
+			resetLabel->fontSize = 8.5f;
+			resetLabel->rightAlign = true;
+			resetLabel->color = settings::preferDarkPanels ? nvgRGB(198, 198, 198) : nvgRGB(82, 82, 82);
+			addChild(resetLabel);
+
+			addParam(createParamCentered<TL1105>(Vec(masterX, clipResetY), module, TModule::CLIP_RESET_PARAM));
+		}
 
 		for (int i = 0; i < TModule::CHANNELS; i++) {
-			Vec pos = Vec(xMargin + i * xSpacing, portY);
+			Vec pos = Vec(leftChannelMargin + i * xSpacing, portY);
 			if (NUM_MODULE_INPUTS > 0)
 				addInput(createInputCentered<ThemedPJ301MPort>(pos, module, TModule::AUDIO_INPUTS + i));
 			if (NUM_MODULE_OUTPUTS > 0)
 				addOutput(createOutputCentered<ThemedPJ301MPort>(pos, module, TModule::AUDIO_OUTPUTS + i));
 
-			ChannelNumberLabel* label = createWidget<ChannelNumberLabel>(Vec(pos.x - 10.f, labelCenterY - 7.f));
+			ChannelNumberLabel* label = createWidget<ChannelNumberLabel>(Vec(pos.x - 10.f, numberY - 7.f));
 			label->box.size = Vec(20.f, 14.f);
 			label->text = getChannelLabelText(module, i);
 			addChild(label);
 			channelLabels.push_back(label);
 
-			addChild(createLightCentered<SmallSimpleLight<RedLight>>(Vec(pos.x, topMeterY), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 0));
-			addChild(createLightCentered<SmallSimpleLight<YellowLight>>(Vec(pos.x, meterBottomY - meterSpacing * 2.f), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 1));
-			addChild(createLightCentered<SmallSimpleLight<GreenLight>>(Vec(pos.x, meterBottomY - meterSpacing), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 2));
-			addChild(createLightCentered<SmallSimpleLight<GreenLight>>(Vec(pos.x, meterBottomY), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 3));
+			if (TModule::HAS_GAIN_UI)
+				addChild(createLightCentered<SmallLight<RedLight>>(Vec(pos.x, clipLightY), module, TModule::CLIP_LIGHTS + i));
+			if (TModule::HAS_GAIN_UI) {
+				for (int seg = 0; seg < TModule::VU_SEGMENTS; seg++) {
+					Vec lightPos = Vec(pos.x, topMeterY + meterSpacing * seg);
+					int lightId = TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + seg;
+					if (seg == 0)
+						addChild(createLightCentered<VuSimpleLight<RedLight>>(lightPos, module, lightId));
+					else if (seg == 1)
+						addChild(createLightCentered<VuSimpleLight<MagentaLight>>(lightPos, module, lightId));
+					else if (seg < 4)
+						addChild(createLightCentered<VuSimpleLight<BlueLight>>(lightPos, module, lightId));
+					else
+						addChild(createLightCentered<VuSimpleLight<GreenLight>>(lightPos, module, lightId));
+				}
+			}
+			else {
+				addChild(createLightCentered<SmallSimpleLight<RedLight>>(Vec(pos.x, topMeterY), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 0));
+				addChild(createLightCentered<SmallSimpleLight<YellowLight>>(Vec(pos.x, meterBottomY - meterSpacing * 2.f), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 1));
+				addChild(createLightCentered<SmallSimpleLight<GreenLight>>(Vec(pos.x, meterBottomY - meterSpacing), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 2));
+				addChild(createLightCentered<SmallSimpleLight<GreenLight>>(Vec(pos.x, meterBottomY), module, TModule::VU_LIGHTS + i * TModule::VU_SEGMENTS + 3));
+			}
+
+			if (TModule::HAS_GAIN_UI) {
+				addParam(createParamCentered<BefacoTinyKnob>(Vec(pos.x, gainY), module, TModule::CHANNEL_GAIN_PARAMS + i));
+			}
 		}
 	}
 
