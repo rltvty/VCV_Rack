@@ -7,7 +7,9 @@ void init(Plugin* p) {
 	p->addModel(modelAudioIn2);
 	p->addModel(modelAudioIn8);
 	p->addModel(modelAudioIn16);
+	p->addModel(modelAudioIn20);
 	p->addModel(modelAudioOut2);
 	p->addModel(modelAudioOut8);
 	p->addModel(modelAudioOut16);
+	p->addModel(modelAudioOut32);
 }

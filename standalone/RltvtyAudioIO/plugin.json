@@ -32,6 +32,14 @@
       ]
     },
     {
+      "slug": "AudioIn20",
+      "name": "Audio In 20",
+      "description": "Receives audio from a hardware device into Rack",
+      "tags": [
+        "External"
+      ]
+    },
+    {
       "slug": "AudioOut2",
       "name": "Audio Out 2",
       "description": "Sends Rack audio to a hardware device",
@@ -50,6 +58,14 @@
     {
       "slug": "AudioOut16",
       "name": "Audio Out 16",
+      "description": "Sends Rack audio to a hardware device",
+      "tags": [
+        "External"
+      ]
+    },
+    {
+      "slug": "AudioOut32",
+      "name": "Audio Out 32",
       "description": "Sends Rack audio to a hardware device",
       "tags": [
         "External"
